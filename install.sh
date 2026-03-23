@@ -28,9 +28,6 @@ mkdir -p "$HOOKS_DIR"
 HOOKS=(
   "pre_tool_use.py"
   "smoke_test.py"
-  "gsd-check-update.js"
-  "gsd-context-monitor.js"
-  "gsd-statusline.js"
 )
 
 echo "Hook files:"
@@ -86,10 +83,6 @@ for event, event_config in source.get("hooks", {}).items():
                 if h.get("command") not in existing_cmds:
                     target["hooks"][event].append(entry)
                     break
-
-# Merge statusLine: only set if not already configured
-if "statusLine" not in target:
-    target["statusLine"] = source["statusLine"]
 
 # Merge permissions.allow: union of both lists, preserving order, no duplicates
 source_allows = source.get("permissions", {}).get("allow", [])

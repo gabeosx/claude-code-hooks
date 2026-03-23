@@ -1,12 +1,14 @@
 # claude-code-hooks
 
-Risk-aware Claude Code hooks for any project. Provides automatic permission decisions, context window monitoring, GSD update checks, and a configurable status line.
+Risk-aware Claude Code hooks for any project. Provides automatic permission decisions and a battle-tested `permissions.allow` whitelist so Claude stops asking about safe commands.
 
 ---
 
 ## What this is
 
 Claude Code's default permission model prompts you for every tool call it isn't certain about. These hooks replace that with a risk-based classifier that auto-allows safe operations (reads, builds, git commands, in-repo scripts) and only prompts for genuinely risky ones (destructive operations, sensitive file access, inline interpreter execution, commands outside a git repo).
+
+The bundled `settings.json` also ships a curated `permissions.allow` whitelist for the most common safe commands (`git *`, `npm *`, `ls *`, `grep *`, etc.) — merged into your project's settings on install without overwriting anything.
 
 A `hook.log` is written for every tool call, including a `[WHITELIST CANDIDATE]` tag on anything that prompted but probably should have auto-allowed. That log is the input to the contribution workflow.
 
@@ -15,9 +17,6 @@ A `hook.log` is written for every tool call, including a `[WHITELIST CANDIDATE]`
 | File | Event | Purpose |
 |---|---|---|
 | `pre_tool_use.py` | `PreToolUse` | Risk classifier — auto-allow or prompt |
-| `gsd-check-update.js` | `SessionStart` | Check for GSD framework updates in background |
-| `gsd-context-monitor.js` | `PostToolUse` | Inject context-window warnings into the agent's conversation |
-| `gsd-statusline.js` | `StatusLine` | Show model, current task, working directory, context bar |
 | `smoke_test.py` | (test) | Regression suite for the risk classifier |
 
 ---
@@ -34,8 +33,8 @@ cd claude-code-hooks
 
 The script:
 - Creates `.claude/hooks/` in the target project
-- Copies all hook files into it
-- Merges hook wiring and allow rules into `.claude/settings.json`, preserving any existing keys
+- Copies `pre_tool_use.py` and `smoke_test.py` into it
+- Merges hook wiring and `permissions.allow` rules into `.claude/settings.json`, preserving any existing keys
 - Adds `hook.log` and `settings.local.json` to the project's `.gitignore`
 
 Then start a new Claude Code session to pick up the changes.
