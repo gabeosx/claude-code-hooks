@@ -55,20 +55,24 @@ def in_git_repo() -> bool:
 def split_on_operators(command: str) -> list[str]:
     """
     Split *command* on &&, ||, |, ;, and newlines while respecting shell
-    quoting.
+    quoting AND parenthesis depth.
 
     Walks the string character-by-character tracking single/double-quote
-    state so that operators inside quoted strings are never treated as
-    separators.  The operators themselves are discarded; only the atomic
-    command segments are returned.
+    state and parenthesis nesting so that operators inside quoted strings
+    or subshells are never treated as separators.  The operators themselves
+    are discarded; only the atomic command segments are returned.
 
     ;  and \\n are treated as equivalent to && — sequential command
     separators with no conditional logic.
+
+    Subshell groups like (cmd1 && cmd2) are kept as a single segment so
+    that score_segment() can recurse into them intact.
     """
     segments: list[str] = []
     current: list[str] = []
     in_single = False
     in_double = False
+    paren_depth = 0  # track ( ) nesting outside quotes
     i = 0
 
     while i < len(command):
@@ -91,29 +95,44 @@ def split_on_operators(command: str) -> list[str]:
             else:
                 i += 1
         elif not in_single and not in_double:
-            two = command[i:i + 2]
-            if two in ('&&', '||'):
-                seg = ''.join(current).strip()
-                if seg:
-                    segments.append(seg)
-                current = []
-                i += 2
-            elif c == '|':
-                seg = ''.join(current).strip()
-                if seg:
-                    segments.append(seg)
-                current = []
-                i += 1
-            elif c in (';', '\n'):
-                # ; and newline are sequential separators, same as &&
-                seg = ''.join(current).strip()
-                if seg:
-                    segments.append(seg)
-                current = []
-                i += 1
-            else:
+            if c == '(':
+                paren_depth += 1
                 current.append(c)
                 i += 1
+            elif c == ')':
+                if paren_depth > 0:
+                    paren_depth -= 1
+                current.append(c)
+                i += 1
+            elif paren_depth > 0:
+                # Inside a subshell group — treat everything as literal
+                # so the whole (cmd1 && cmd2) stays as one segment.
+                current.append(c)
+                i += 1
+            else:
+                two = command[i:i + 2]
+                if two in ('&&', '||'):
+                    seg = ''.join(current).strip()
+                    if seg:
+                        segments.append(seg)
+                    current = []
+                    i += 2
+                elif c == '|':
+                    seg = ''.join(current).strip()
+                    if seg:
+                        segments.append(seg)
+                    current = []
+                    i += 1
+                elif c in (';', '\n'):
+                    # ; and newline are sequential separators, same as &&
+                    seg = ''.join(current).strip()
+                    if seg:
+                        segments.append(seg)
+                    current = []
+                    i += 1
+                else:
+                    current.append(c)
+                    i += 1
         else:
             current.append(c)
             i += 1
@@ -186,7 +205,8 @@ BUILD_CMDS = {
 
 # Interpreter commands are scored by their script-path argument, not the
 # interpreter name itself — python -c "..." is not the same as python ./script.py
-INTERPRETER_CMDS = {"python", "python3", "node", "ts-node", "ruby", "bash"}
+# sh/dash/zsh/ksh are included: `sh -c "dangerous"` must not bypass the check.
+INTERPRETER_CMDS = {"python", "python3", "node", "ts-node", "ruby", "bash", "sh", "dash", "zsh", "ksh"}
 
 GIT_CMDS = {"git"}
 
@@ -195,8 +215,7 @@ GIT_CMDS = {"git"}
 # always safe within a git repo context.
 SAFE_DEVOPS_CMDS = {
     "lsof", "ps", "pgrep",       # process / socket inspection (read-only)
-    "xargs",                      # pipe helper — safety is determined by the
-                                  # piped command, not xargs itself
+    # xargs is handled separately: its subcommand is extracted and re-scored
     "sleep", "wait",              # timing / synchronization
     "kill", "pkill", "killall",   # process termination (dev-ops, not destructive
                                   # to files or data)
@@ -241,6 +260,45 @@ def script_in_repo(script_arg: str) -> bool:
         return False
 
 
+def xargs_subcommand(xargs_args: list[str]) -> str:
+    """
+    Extract the command xargs will execute from its argument list.
+
+    Skips xargs's own flags (and any argument those flags consume) so that
+    the first non-flag token — the actual command xargs will run — is
+    returned as a shell-safe string ready for score_segment().
+
+    Returns an empty string when xargs is invoked with no explicit command
+    (in which case xargs defaults to echo, which is safe).
+    """
+    # Flags that consume the next token as their argument value
+    _arg_value_flags = {
+        "-I", "-L", "-n", "-P", "-d", "-s",
+        "--replace", "--max-lines", "--max-args",
+        "--max-procs", "--delimiter", "--max-chars",
+    }
+    skip_next = False
+    found_cmd = False
+    cmd_tokens: list[str] = []
+    for tok in xargs_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if found_cmd:
+            # Past the command token — everything remaining is the subcommand's args
+            cmd_tokens.append(tok)
+        elif tok.startswith("-"):
+            # Still in xargs's own flags — strip them
+            bare = tok.split("=")[0]
+            if bare in _arg_value_flags and "=" not in tok and len(tok) == len(bare):
+                skip_next = True
+        else:
+            # First non-flag token is the command xargs will run
+            found_cmd = True
+            cmd_tokens.append(tok)
+    return shlex.join(cmd_tokens) if cmd_tokens else ""
+
+
 # ---------------------------------------------------------------------------
 # Per-tool decision logic
 # ---------------------------------------------------------------------------
@@ -255,6 +313,17 @@ def score_segment(seg: str) -> tuple[str, str]:
     if not seg:
         return "allow", "empty segment"
 
+    # Subshell group (cmd1 && cmd2) — recurse into the inner content.
+    # split_on_operators keeps these intact.  Use seg[1:-1] (not lstrip/rstrip)
+    # so that nested parens like (cmd && (inner)) are not over-stripped.
+    # Only recurse when the segment is properly wrapped: starts with ( and ends
+    # with ) — if the ) is missing the segment is malformed and falls through.
+    if seg.startswith("(") and seg.endswith(")"):
+        inner = seg[1:-1].strip()
+        if inner:
+            return decide_bash({"command": inner})
+        return "allow", "empty subshell"
+
     tokens = tokenize(seg)
     if not tokens:
         return "allow", "empty segment after tokenization"
@@ -268,8 +337,14 @@ def score_segment(seg: str) -> tuple[str, str]:
         tokens = tokens[2:]
         seg = shlex.join(tokens)
 
-    # Base command: basename of first token, strip any leading subshell `(`
-    cmd0 = tokens[0].lstrip("(").split("/")[-1]
+    # Base command: basename of first token.
+    # Strip leading `(` (subshell prefix) and trailing `)` / `;` that shlex
+    # may leave attached when the splitter didn't fully unwrap a subshell.
+    cmd0 = tokens[0].lstrip("(").split("/")[-1].rstrip(");")
+
+    # eval/exec execute an arbitrary string as a shell command — always ask.
+    if cmd0 in ("eval", "exec"):
+        return "ask", f"{cmd0} executes arbitrary strings"
 
     # Outright destructive patterns — string-match on segment
     for pat in DESTRUCTIVE_PATTERNS:
@@ -324,6 +399,14 @@ def score_segment(seg: str) -> tuple[str, str]:
     # Build/lint/test commands
     if cmd0 in BUILD_CMDS:
         return "allow", "build/lint/test command"
+
+    # xargs — safety depends on what it runs, not xargs itself.
+    # Extract the subcommand and score it; default echo is safe.
+    if cmd0 == "xargs":
+        sub = xargs_subcommand(tokens[1:])
+        if sub:
+            return score_segment(sub)
+        return "allow", "xargs with no explicit command (defaults to echo)"
 
     # Dev-ops utilities (process inspection, pipe helpers, timing, process control)
     if cmd0 in SAFE_DEVOPS_CMDS:

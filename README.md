@@ -66,8 +66,11 @@ Then manually merge `settings.json` into `.claude/settings.json`.
 | `rm -rf` on other paths | Ask |
 | Build/lint/test commands (`npm`, `tsc`, `vitest`, `pytest`, …) | Allow |
 | Dev-ops commands (`lsof`, `ps`, `kill`, `sleep`, …) inside a git repo | Allow |
-| Interpreter (`python`, `node`, `bash`) running an in-repo script | Allow |
+| Interpreter (`python`, `node`, `bash`, `sh`, `zsh`, `ksh`, `dash`) running an in-repo script | Allow |
 | Interpreter with `-c`/`-e` (inline eval) or external script path | Ask |
+| `eval` or `exec` | Ask |
+| `xargs <cmd>` — subcommand is extracted and scored by the same rules | Allow/Ask |
+| Subshell group `(cmd1 && cmd2)` — recursed into and each segment scored | Allow/Ask |
 | Destructive patterns (`shred`, `dd if=`, `mkfs`, …) | Ask |
 | Anything else inside a git repo | Allow |
 | Anything else outside a git repo | Ask |
